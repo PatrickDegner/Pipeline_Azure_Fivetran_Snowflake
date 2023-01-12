@@ -7,7 +7,7 @@ CREATE TABLE customer (
     street VARCHAR(255) NOT NULL,
     city VARCHAR(50) NOT NULL,
     zip_code CHAR(5) NOT NULL,
-	UNIQUE (email)
+    UNIQUE (email)
 );
 
 -- create banking details table
