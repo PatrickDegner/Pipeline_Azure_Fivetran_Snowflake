@@ -1,0 +1,416 @@
+Data Transfer from Azure SQL to Snowflake: My Experience Using Slowly Changing Dimensions, Change Data Capture, and Column Data Masking with Fivetran
+Januar 15, 2023
+
+
+
+
+Creating a data pipeline from Azure SQL Server to Snowflake can be a complex and time-consuming task, but with the help of Fivetran, the process is made much simpler. 
+In this blog post, we will discuss the steps involved in creating a robust pipeline that includes the use of Slowly Changing Dimensions Type 2 for historical data, Change Data Capture for transferring only new data to Snowflake, and Column Data Masking for hiding Personally Identifiable Information (PII) for security reasons.
+
+We use the Azure SQL Database like it is an OLTP Database from which we want to pull the data into the OLAP System.
+
+This Blog is split into multiple parts:
+Azure SQL Server Setup
+Snowflake Setup
+Fivetran Setup
+Results
+The End
+Slowly Changing Dimensions Type 2 is a technique used to track changes to data over time. 
+It allows us to maintain a history of changes to data, which is essential when working with large datasets.
+By using this method, we can ensure that our data is accurate and up to date, even as it changes over time.
+
+Change Data Capture is another important component of our pipeline. 
+It allows us to only transfer new data to Snowflake, rather than having to transfer the entire dataset each time. 
+This can significantly reduce the time and resources required to transfer data, making the process more efficient.
+
+Finally, we have Column Data Masking. 
+This is a security measure that is used to hide Personally Identifiable Information (PII) from the data. 
+By using this technique, we can ensure that sensitive information is not exposed, helping to protect the privacy of our users.
+
+
+Part1 
+
+Azure SQL Server Setup
+
+The first step in creating our pipeline is to set up an Azure Database. 
+This can be done by following the steps outlined in this tutorial:
+https://learn.microsoft.com/en-us/azure/azure-sql/database/single-database-create-quickstart
+
+Once our Azure Database is set up, we can connect to it using Azure Data Studio. 
+You can use this tutorial:
+https://learn.microsoft.com/en-us/sql/azure-data-studio/quickstart-sql-database
+
+Next, we will create the necessary tables for our pipeline. 
+In this example, we will only be using two small tables: a "customer" table and a "banking_details" table. 
+The code for creating these tables is as follows:
+
+CREATE TABLE customer (
+    id INT PRIMARY KEY IDENTITY(10000,1),
+    first_name VARCHAR(50) NOT NULL,
+    last_name VARCHAR(50) NOT NULL,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    street VARCHAR(255) NOT NULL,
+    city VARCHAR(50) NOT NULL,
+    zip_code CHAR(5) NOT NULL,
+	UNIQUE (email)
+
+);
+CREATE TABLE banking_details (
+    id INT PRIMARY KEY IDENTITY(1,1),
+    customer_id INT NOT NULL,
+    type VARCHAR(20) NOT NULL CHECK (type IN ('VISA', 'MasterCard', 'Discover', 'American Express')),
+    cc_number VARCHAR(20) NOT NULL,
+    expiration_date DATE NOT NULL,
+    UNIQUE (cc_number),
+    FOREIGN KEY (customer_id) REFERENCES customer(id)
+);
+view rawcreate_tables.sql hosted with ❤ by GitHub
+
+In the customer table, we've created the columns for 'id', 'first_name', 'last_name', 'email', 'street', 'city' and 'zip_code' and set 'email' as the unique key. 
+In the banking_details table, we've created columns for 'id', 'customer_id', 'type', 'cc_number' and 'expiration_date' and set 'cc_number' as the unique key. 
+We've also added a foreign key 'customer_id' referencing the 'id' column in the customer table.
+
+With our tables created and set up, we can now insert some fake data into them. 
+As mentioned earlier, we would usually use Column Data Masking on the data, but for the purposes of this tutorial, we will not be doing that yet. 
+The code i used for inserting the data:
+
+INSERT INTO customer (first_name, last_name, email, street, city, zip_code)
+VALUES 
+('John', 'Doe', 'johndoe@example.com', '123 Main St', 'Bielefeld', '12345'),
+('Jane', 'Smith', 'janesmith@example.com', '456 Elm St', 'Munich', '67890'),
+('Bob', 'Johnson', 'bobjohnson@example.com', '789 Oak St', 'Berlin', '09876'),
+('Amy', 'Williams', 'amywilliams@example.com', '321 Pine St', 'Stuttgart', '54321'),
+('Michael', 'Brown', 'michaelbrown@example.com', '654 Cedar St', 'Leipzig', '67890'),
+('Jessica', 'Jones', 'jessicajones@example.com', '987 Birch St', 'Frankfurt', '24680');
+
+INSERT INTO banking_details (customer_id, type, cc_number, expiration_date)
+VALUES 
+(10000, 'VISA', '1234567890123456', '2025-12-31'),
+(10001, 'MasterCard', '2223334445556667', '2022-12-31'),
+(10002, 'Discover', '1112223334445556', '2022-12-31'),
+(10003, 'American Express', '9876543210123456', '2022-12-31'),
+(10004, 'VISA', '12345678901234576', '2022-12-31'),
+(10005, 'MasterCard', '22233344454556667', '2022-12-31');
+view rawinsert_data.sql hosted with ❤ by GitHub
+
+With the data inserted, we can now run a SELECT statement to see the results. 
+The SELECT statement we will use is as follows:
+
+SELECT T0.*, T1.*
+FROM customer T0 
+INNER JOIN banking_details T1 ON T1.customer_id = T0.id
+view rawselect.sql hosted with ❤ by GitHub
+
+This will give us a table that includes all of the columns from both the "customer" table and the "banking_details" table, with the rows matching based on the customer_id in the banking_details table and the id in the customer table.
+
+
+
+With our data in place, we can now move on to the next step in our pipeline: Change Data Capture. Change Data Capture (CDC) is a feature in Databases that allows us to track and capture insert, update, and delete activity on a table. 
+This is an important feature for our pipeline, as it allows us to only transfer new data to Snowflake, rather than having to transfer the entire dataset each time.
+
+To enable CDC on our Azure SQL Server database, we will use the following SQL code:
+
+EXEC sys.sp_cdc_enable_db;
+EXEC sys.sp_cdc_enable_table  
+@source_schema = [dbo],
+@source_name   = [customer],
+@role_name     = [patrickadmin];
+EXEC sys.sp_cdc_enable_table  
+@source_schema = [dbo],
+@source_name   = [banking_details],
+@role_name     = [patrickadmin];
+view rawenable_cdc.sql hosted with ❤ by GitHub
+
+This code activates CDC on our database and enables it for the "customer" and "banking_details" tables. 
+The "@role_name" parameter is set to "patrickadmin" in this example, but it can be set to any valid role name that has the necessary permissions.
+It's important to note that you will need a standard tier S3 100 DTU database to enable CDC, which can be seen in the screenshot provided.
+
+
+
+
+
+
+Part2 
+Snowflake Setup
+To begin, we will create a free Snowflake trial account. This can be done by visiting the Snowflake website and signing up for the free trial.
+https://www.snowflake.com
+
+Next, we will create a developer role in Snowflake aswell as a database. 
+We will use the following code to create the role and grant necessary rights to access the data:
+
+-- use admin role
+USE ROLE ACCOUNTADMIN;
+
+-- create role for developer
+CREATE ROLE IF NOT EXISTS DEVELOPER;
+GRANT ROLE DEVELOPER TO ROLE SYSADMIN;
+
+-- create database
+CREATE DATABASE IF NOT EXISTS PATRICKDB;
+
+-- grant developer role access to warehouse
+GRANT USAGE ON WAREHOUSE COMPUTE_WH TO ROLE DEVELOPER;
+
+-- grant developer access to database and future schemas/tables (full access)
+GRANT CREATE SCHEMA, USAGE ON DATABASE PATRICKDB TO DEVELOPER;
+GRANT USAGE ON FUTURE SCHEMAS IN DATABASE PATRICKDB TO ROLE DEVELOPER;
+GRANT SELECT ON FUTURE TABLES IN DATABASE PATRICKDB TO ROLE DEVELOPER;
+
+-- give yourself the developer role
+GRANT ROLE DEVELOPER TO USER NEFI;
+
+-- use developer role
+USE ROLE DEVELOPER;
+view rawsnowflake_role.sql hosted with ❤ by GitHub
+This code will create a developer role, grant it access to a warehouse, and create a database named "PATRICKDB". 
+It also grants the developer role full access to the database and future schemas/tables. 
+Finally, the code switches to the developer role to perform any further operations.
+
+As we continue to set up our Snowflake environment, the next step is to create a data warehouse schema within our database. This schema will be used to store and organize our data.
+
+The following code can be used to create the data warehouse schema:
+
+-- create the datawarehouse schema
+CREATE SCHEMA IF NOT EXISTS DWH_DBO;
+
+-- use the DWH_DBO schema
+USE SCHEMA PATRICKDB.DWH_DBO;
+view rawcreate_schema.sql hosted with ❤ by GitHub
+Now that we have our data warehouse schema set up, we can create the tables that will store our data within it. 
+The following code can be used to create the "CUSTOMER" and "BANKING_DETAILS" tables in our Snowflake schema:
+
+CREATE TABLE CUSTOMER (
+    id INT,
+    first_name VARCHAR(50) NOT NULL,
+    last_name VARCHAR(50) NOT NULL,
+    email VARCHAR(255) NOT NULL,
+    street VARCHAR(255) NOT NULL,
+    city VARCHAR(50) NOT NULL,
+    zip_code CHAR(5) NOT NULL
+);
+
+CREATE TABLE BANKING_DETAILS (
+    id INT,
+    customer_id INT NOT NULL,
+    type VARCHAR(20) NOT NULL,
+    cc_number VARCHAR(20) NOT NULL,
+    expiration_date DATE NOT NULL
+);
+view rawsnowflake_tables.sql hosted with ❤ by GitHub
+
+These statements create tables named "CUSTOMER" and "BANKING_DETAILS" within our "DWH_DBO" schema, with the same columns and data types as the tables we created in Azure SQL Server. 
+It is important to note that Snowflake does not require primary keys or indexes to be created, as it automatically indexes data for optimal query performance.
+
+In the next step we create a masking policy and add it to the columns we want to hide the sensitive data such as email addresses, street addresses, city names and zip codes, as well as credit card numbers.
+
+The following code can be used to create and apply the masking policy to the appropriate columns in our "CUSTOMER" and "BANKING_DETAILS" tables:
+
+-- create a masking policy
+CREATE OR REPLACE MASKING POLICY CUSTOMER_MASK AS (val string) returns string ->
+CASE
+WHEN CURRENT_ROLE() IN ('DEVELOPER') THEN VAL
+ELSE '*********'
+END;
+
+-- add the masking policy to tables
+ALTER TABLE IF EXISTS PATRICKDB.DWH_DBO.CUSTOMER MODIFY COLUMN EMAIL SET MASKING POLICY CUSTOMER_MASK;
+ALTER TABLE IF EXISTS PATRICKDB.DWH_DBO.CUSTOMER MODIFY COLUMN STREET SET MASKING POLICY CUSTOMER_MASK;
+ALTER TABLE IF EXISTS PATRICKDB.DWH_DBO.CUSTOMER MODIFY COLUMN CITY SET MASKING POLICY CUSTOMER_MASK;
+ALTER TABLE IF EXISTS PATRICKDB.DWH_DBO.CUSTOMER MODIFY COLUMN ZIP_CODE SET MASKING POLICY CUSTOMER_MASK;
+ALTER TABLE IF EXISTS PATRICKDB.DWH_DBO.BANKING_DETAILS MODIFY COLUMN CC_NUMBER SET MASKING POLICY CUSTOMER_MASK;
+view rawmasking_policy.sql hosted with ❤ by GitHub
+By pulling the data into the Snowflake tables, the sensitive information will be hidden as per the masking policy we defined.
+
+Next, we set up a separate user and warehouse specifically for use with the data integration tool Fivetran. 
+This allows Fivetran to access and load data without interfering with or slowing down other users' operations. 
+The code for creating this user, role, and warehouse, along with granting the necessary permissions, is as following:
+-- setup
+use role ACCOUNTADMIN;
+use schema PATRICKDB.DWH_DBO;
+
+-- create variables for user / password / role / warehouse / database (needs to be uppercase for objects)
+set role_name = 'FIVETRAN_ROLE';
+set user_name = 'FIVETRAN_USER';
+set user_password = 'Patrick123';
+set warehouse_name = 'FIVETRAN';
+set database_name = 'PATRICKDB';
+
+-- create a warehouse for fivetran
+create warehouse if not exists identifier($warehouse_name)
+warehouse_size = xsmall
+warehouse_type = standard
+auto_suspend = 60
+auto_resume = true
+initially_suspended = true;
+
+-- create role for fivetran
+create role if not exists identifier($role_name);
+grant role identifier($role_name) to role SYSADMIN;
+
+-- create a user for fivetran
+create user if not exists identifier($user_name)
+password = $user_password
+default_role = $role_name
+default_warehouse = $warehouse_name;
+
+grant role identifier($role_name) to user identifier($user_name);
+
+-- grant fivetran role access to warehouse
+grant USAGE
+on warehouse identifier($warehouse_name)
+to role identifier($role_name);
+
+-- grant fivetran access to database
+grant CREATE SCHEMA, MONITOR, USAGE
+on database identifier($database_name)
+to role identifier($role_name);
+
+-- grant fivetran access to schema
+GRANT OWNERSHIP ON SCHEMA DWH_DBO TO ROLE identifier($role_name) REVOKE CURRENT GRANTS;
+GRANT OWNERSHIP ON TABLE BANKING_DETAILS TO ROLE identifier($role_name) REVOKE CURRENT GRANTS;
+GRANT OWNERSHIP ON TABLE CUSTOMER TO ROLE identifier($role_name) REVOKE CURRENT GRANTS;
+
+use role FIVETRAN_ROLE;
+GRANT USAGE ON SCHEMA DWH_DBO TO ROLE DEVELOPER;
+GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES ON TABLE DWH_DBO.BANKING_DETAILS TO ROLE DEVELOPER;
+GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES ON TABLE DWH_DBO.CUSTOMER TO ROLE DEVELOPER;
+
+-- set binary_input_format to BASE64
+ALTER USER identifier($user_name) SET BINARY_INPUT_FORMAT = 'BASE64';
+  
+use role DEVELOPER;
+use WAREHOUSE COMPUTE_WH;
+view rawfivetran_user.sql hosted with ❤ by GitHub
+
+
+Part3
+Fivetran Setup
+
+In this part of the process, we will set up Fivetran to connect to Snowflake and Azure.
+First, we need to create a Fivetran account. This can be done easily by using the Partner Connect feature in Snowflake, which can be found under Admin > Partner Connect. 
+Here, you can search for Fivetran and connect it to your account. 
+Alternatively, you can manually create a new account and add all the necessary information like we will do.
+
+We need to obtain the host URL for Snowflake. This can be found by copying the account URL from Snowflake, as shown in the provided screenshot.
+
+
+
+In Fivetran we will add a new destination and call it Snowflake.
+
+
+
+In the host field, we use the account URL without the http part.
+The port is 443.
+The user is FIVETRAN_USER
+The database is the name of your database (mine is PATRICKDB)
+The auth is PASSWORD, and the password is the one we used while creating the Fivetran user (mine is Patrick123).
+The role is FIVETRAN_ROLE
+The location is the location of your data warehouse (mine is EU)
+The provider is Azure
+The timezone is your timezone.
+
+
+
+
+Finally, we can use Save & Test and if everything is correct, it will work.
+
+
+
+
+
+Looks like it worked :)
+Next we need a connector to our Azure Database.
+In this step, we will set up Fivetran to connect to our Azure SQL Database.
+Go to Connectors in Fivetran and add a new one.
+Search for "Azure SQL Database" and select it.
+In the schema field, use "DWH"
+In the host field, use the server name found in the overview blade of the Azure SQL Database
+
+For example, "patricksserver.database.windows.net"
+Use port 1433.
+Use the login credentials for the Azure SQL Database. In this example, the user is "patrickadmin@patricksserver" and the password is "Patrick123"
+In the database field, use the name of the Azure SQL Database. For example, "patrick_azure_db"
+We have to add the IP's to our Firewall allowance in Azure. I have added the ips to my azure server under Networking blade like you can see on the screenshot
+
+Use the "Save & Test" button to ensure the connection is successful.
+
+
+
+
+With the configuration provided above, Fivetran will automatically fetch the schema and tables from the Snowflake database. 
+In this example, we have chosen to include both the CUSTOMER and BANKING_DETAILS tables for this project. 
+Additionally, since we wanted to implement a Slowly Changing Dimension Type 2 and Change Data Capture pipeline, we activated it under the Connectors > Schema > Change to History, as seen in the screenshot provided.
+
+
+
+Lastly, under the Connectors > Status tab, we initiate the initial synchronization and wait for the initial data load to complete.
+
+Part4
+Results
+To verify the success of our data pipeline, we can now query the BANKING_DETAILS and CUSTOMER tables in Snowflake and review the output. Additionally, you should see the new columns generated in the manner of slowly changing dimensions (SCD).
+
+SELECT * FROM BANKING_DETAILS;
+SELECT * FROM CUSTOMER;
+view rawselect_flake.sql hosted with ❤ by GitHub
+
+
+
+To verify that our data masking policy is working correctly, we will switch to the user accountadmin (or any other user with permissions) and run the same queries we used earlier to retrieve data from the BANKING_DETAILS and CUSTOMER tables. 
+
+
+
+As expected, the sensitive information such as the credit card numbers will be masked and not accessible to this user. 
+This confirms that our data masking policy has been set up and implemented successfully.
+
+Next, we will test the CDC functionality to ensure that it is also functioning as expected.
+
+Now, in Azure Data Studio, we add a new row to both the CUSTOMER and BANKING_DETAILS tables. 
+Then, we manually run the sync in Fivetran to ensure that the changes are being captured by the CDC pipeline.
+-- add a new customer and banking details
+INSERT INTO customer (first_name, last_name, email, street, city, zip_code)
+VALUES 
+('Patrick', 'IsHere', 'patrick@ishere.too', 'No Street 1', 'Hamburg', '55555');
+
+INSERT INTO banking_details (customer_id, type, cc_number, expiration_date)
+VALUES 
+(10006, 'VISA', '666555444333222111', '2026-05-30');
+view rawazure_new_row.sql hosted with ❤ by GitHub
+
+
+
+We can see that the new row has been added to both tables, and in the fivetran_sync column, it is evident that the data is untouched and only the new row has been added.
+
+Next we are going to test the last thing. 
+Slowly changing dimension. When we update a new column, the active state, start and end should be changed. 
+Lets see on the next screenshot what will happen after we use this code and sync in fivetran.
+UPDATE customer
+SET street = '122 New Street'
+WHERE email = 'jessicajones@example.com';
+view rawupdate_row.sql hosted with ❤ by GitHub
+
+
+
+As we can see, the update to the customer table was successful. The street for Jessica Jones has been updated to '122 New Street' and the previous street is now recorded as history with an active state of false. This demonstrates the functionality of the slowly changing dimension we set up earlier.
+
+In the final step, we tested the history for deleted rows. By executing the following code in Azure:
+DELETE FROM banking_details
+WHERE customer_id = (SELECT id FROM customer WHERE email = 'bobjohnson@example.com');
+view rawdelete_row.sql hosted with ❤ by GitHub
+
+
+
+The status was set to inactive, as expected.
+
+Part5
+The End
+We have successfully set up a Snowflake data warehouse, created tables, implemented data masking and slowly changing dimension, and also integrated Fivetran for data pipeline and data replication. 
+We have also tested the system for data masking, CDC, and SCD, and we can see that it works as expected. 
+This project serves as an example of how easy it is to set up a data warehouse with Snowflake and Fivetran, and how powerful these tools can be in managing and protecting sensitive data. 
+
+Thanks for following along and i hope you found this helpful.
+
+Thank you for reading. 
+I had a lot of fun working on this project.
+
+Greetings
+Patrick :)
